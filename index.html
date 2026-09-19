@@ -800,13 +800,25 @@ var modalLastFocus = null;
 function openModal(title, bodyHtml, footerHtml, wide) {
   modalLastFocus = document.activeElement;
   qs('#modal-root').innerHTML =
-    '<div class="modal-backdrop" data-act="modal-backdrop">' +
+    '<div class="modal-backdrop">' +
       '<div class="modal' + (wide ? ' wide' : '') + '" role="dialog" aria-modal="true" aria-label="' + esc(title) + '">' +
         '<header><h2>' + esc(title) + '</h2><button class="iconbtn" data-act="close-modal" aria-label="Close">&times;</button></header>' +
         '<div class="body">' + bodyHtml + '</div>' +
         (footerHtml ? '<footer>' + footerHtml + '</footer>' : '') +
       '</div>' +
     '</div>';
+  /* Closing on a backdrop click is wired directly here, not through the [data-act]
+     delegation below. That delegation walks up with closest() and would otherwise
+     match this wrapper for every plain element inside the modal (a <label>, a bare
+     checkbox, anything with no data-act of its own) and call preventDefault() on it
+     before this handler even runs — silently cancelling things like a file <label>
+     opening its picker. */
+  var backdrop = qs('.modal-backdrop');
+  if (backdrop) {
+    backdrop.addEventListener('click', function (event) {
+      if (event.target === backdrop) closeModal();
+    });
+  }
   var first = qs('#modal-root input, #modal-root select, #modal-root textarea, #modal-root button');
   if (first) first.focus();
 }
@@ -1082,7 +1094,6 @@ var Actions = {
     });
   },
   'close-modal': function () { closeModal(); },
-  'modal-backdrop': function (el, event) { if (event.target === el) closeModal(); },
   'go': function (btn) { location.hash = btn.getAttribute('data-hash'); }
 };
 
