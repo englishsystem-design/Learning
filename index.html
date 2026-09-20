@@ -741,7 +741,10 @@ function setActiveNav(hash) {
 
 /* --- 6. VIEW HELPERS -------------------------------------------------- */
 function view() { return qs('#main'); }
-function setView(html) { var m = view(); if (m) { m.innerHTML = html; m.scrollIntoView({ block: 'start' }); } }
+function setView(html) {
+  if (PendingViewHash !== null && (location.hash || '') !== PendingViewHash) return;
+  var m = view(); if (m) { m.innerHTML = html; m.scrollIntoView({ block: 'start' }); }
+}
 function showLoading(label) { setView('<div class="loading">' + esc(label || 'Loading…') + '</div>'); }
 function showError(error) {
   setView('<div class="notice error"><strong>' + esc(error.code || 'ERROR') + '</strong> — ' + esc(error.message) + '</div>' +
@@ -979,9 +982,18 @@ var STUDENT_ROUTES = {
   'profile': viewProfile
 };
 
+/* A view function calls showLoading() then, once its api() promise resolves, calls setView()
+   with the final HTML. If the user navigates away before that promise resolves, the late
+   response must not overwrite whatever the newer page has already rendered. PendingViewHash
+   is stamped once per route() dispatch (covering async view renders and the synchronous
+   "page not found"/error paths below equally); setView() silently skips a stale paint instead
+   of fighting the current page for control of the DOM. */
+var PendingViewHash = null;
+
 function route() {
   if (!State.user) { renderLogin(); return; }
   var r = parseHash();
+  PendingViewHash = location.hash || '';
   setActiveNav(location.hash || '');
   var table = State.user.role === 'TEACHER' ? TEACHER_ROUTES : STUDENT_ROUTES;
   var handler = table[r.name];
