@@ -455,7 +455,8 @@ var ICONS = {
   logout: '<path d="M14 7V5.5A1.5 1.5 0 0 0 12.5 4h-6A1.5 1.5 0 0 0 5 5.5v13A1.5 1.5 0 0 0 6.5 20h6a1.5 1.5 0 0 0 1.5-1.5V17"/><path d="M10 12h10m0 0-3-3m3 3-3 3"/>',
   user: '<circle cx="12" cy="8" r="3.6"/><path d="M5 20v-1a4.5 4.5 0 0 1 4.5-4.5h5A4.5 4.5 0 0 1 19 19v1"/>',
   key: '<circle cx="8" cy="12" r="4"/><path d="M12 12h8m-3 0v3m3-3v2.5"/>',
-  trash: '<path d="M5 7h14"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M7 7l1 13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-13"/><path d="M10 11v6M14 11v6"/>'
+  trash: '<path d="M5 7h14"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M7 7l1 13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1l1-13"/><path d="M10 11v6M14 11v6"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M8 3v4M16 3v4M3.5 10h17"/><path d="M7.5 14h2M11 14h2M14.5 14h2M7.5 17h2M11 17h2"/>'
 };
 function icon(name, size) {
   var body = ICONS[name] || ICONS.grid;
@@ -680,6 +681,7 @@ var NAV = {
     { hash: '#/curriculum', label: 'Curriculum', icon: 'layers' },
     { hash: '#/lessons', label: 'Lessons', icon: 'book' },
     { hash: '#/classes', label: 'Classes', icon: 'users' },
+    { hash: '#/attendance', label: 'Attendance', icon: 'calendar' },
     { hash: '#/assignments', label: 'Assignments', icon: 'clipboard' },
     { hash: '#/questions', label: 'Question Bank', icon: 'help' },
     { hash: '#/quizzes', label: 'Quizzes', icon: 'checksquare' },
@@ -692,6 +694,7 @@ var NAV = {
     { hash: '#/lessons', label: 'Lessons', icon: 'book' },
     { hash: '#/assignments', label: 'Assignments', icon: 'clipboard' },
     { hash: '#/practice', label: 'Practice', icon: 'target' },
+    { hash: '#/attendance', label: 'Attendance', icon: 'calendar' },
     { hash: '#/progress', label: 'Progress', icon: 'trend' }
   ]
 };
@@ -964,6 +967,7 @@ var TEACHER_ROUTES = {
   'curriculum': viewCurriculum,
   'lessons': viewLessons,
   'classes': viewClasses,
+  'attendance': viewAttendanceTeacher,
   'assignments': viewAssignments,
   'questions': viewQuestions,
   'quizzes': viewQuizzes,
@@ -978,6 +982,7 @@ var STUDENT_ROUTES = {
   'assignments': viewStudentAssignments,
   'practice': viewPractice,
   'quiz': viewQuizRunner,
+  'attendance': viewMyAttendance,
   'progress': viewStudentProgress,
   'profile': viewProfile
 };
@@ -2896,6 +2901,237 @@ Actions['quiz-status'] = function (btn) {
 };
 
 /* --- Assessment --------------------------------------------------------- */
+/* --- Attendance --------------------------------------------------------
+   One view per role. The teacher page has three tabs (mark / history / summary) driven by the
+   hash (#/attendance/CLASSID/tab), matching how every other class-scoped page in this app
+   already works. The student page is read-only, own records only. */
+var ATTENDANCE_LABELS = { PRESENT: 'Hadir', LATE: 'Terlambat', EXCUSED: 'Izin', SICK: 'Sakit', ABSENT: 'Alpa' };
+function attendanceStatusLabel(status) { return ATTENDANCE_LABELS[status] || status; }
+function attendanceBadgeHtml(status) {
+  var tones = {
+    PRESENT: 'badge active', LATE: 'badge draft', EXCUSED: 'badge info',
+    SICK: 'badge info', ABSENT: 'badge inactive'
+  };
+  var extra = status === 'ABSENT' ? ' style="color:var(--rose);background:var(--rose-soft);border-color:#EFD2D6"' : '';
+  return '<span class="' + (tones[status] || 'badge') + '"' + extra + '>' + esc(attendanceStatusLabel(status)) + '</span>';
+}
+function todayIso_() {
+  var d = new Date(), pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+function viewAttendanceTeacher(r) {
+  showLoading();
+  loadClasses().then(function (classes) {
+    if (!classes.length) {
+      setView(pageHead('Attendance', 'Take and review attendance for your classes.') +
+        emptyState('No classes yet', 'Create a class first, then come back here to take attendance.',
+          '<a class="btn" href="#/classes">Create a class</a>'));
+      return;
+    }
+    var classId = (r && r.id) || State.view.attClassId || classes[0].id;
+    if (!classes.some(function (c) { return c.id === classId; })) classId = classes[0].id;
+    var tab = (r && r.sub) || 'mark';
+    State.view.attClassId = classId;
+    State.view.attTab = tab;
+    if (!State.view.attDate) State.view.attDate = todayIso_();
+    if (!State.view.attFrom) State.view.attFrom = todayIso_();
+    if (!State.view.attTo) State.view.attTo = todayIso_();
+
+    var classOptions = classes.map(function (c) { return { value: c.id, label: c.name }; });
+
+    setView(
+      pageHead('Attendance', 'Take and review attendance for your classes.') +
+      '<div class="filterbar">' +
+        '<div class="field"><label>Class</label><select id="att-class">' + selectOptions(classOptions, classId) + '</select></div>' +
+      '</div>' +
+      '<div class="tabs" role="tablist">' +
+        '<button type="button" data-act="att-tab" data-tab="mark" aria-selected="' + (tab === 'mark') + '">Mark attendance</button>' +
+        '<button type="button" data-act="att-tab" data-tab="history" aria-selected="' + (tab === 'history') + '">History</button>' +
+        '<button type="button" data-act="att-tab" data-tab="summary" aria-selected="' + (tab === 'summary') + '">Summary</button>' +
+      '</div>' +
+      '<div id="att-body"><div class="loading">Loading…</div></div>'
+    );
+    loadAttendanceTab(classId, tab);
+  }).catch(showError);
+}
+
+function loadAttendanceTab(classId, tab) {
+  if (tab === 'history') return loadAttendanceHistory(classId);
+  if (tab === 'summary') return loadAttendanceSummary(classId);
+  return loadAttendanceMarkForm(classId);
+}
+function attendanceBodyError_(error) {
+  var body = qs('#att-body');
+  if (body) body.innerHTML = '<div class="notice error">' + esc(error.message) + '</div>';
+}
+
+function loadAttendanceMarkForm(classId) {
+  api('attendance.roster', { classId: classId, date: State.view.attDate }).then(function (data) {
+    var body = qs('#att-body'); if (!body) return;
+    var statuses = (data.statuses && data.statuses.length) ? data.statuses : ['PRESENT', 'LATE', 'EXCUSED', 'SICK', 'ABSENT'];
+    var statusOptions = [{ value: '', label: '— Select —' }].concat(
+      statuses.map(function (s) { return { value: s, label: attendanceStatusLabel(s) }; }));
+    var rows = (data.students || []).map(function (s) {
+      return '<tr data-student="' + esc(s.studentId) + '">' +
+        '<td>' + esc(s.name) + (s.identityNo ? '<div class="small muted">' + esc(s.identityNo) + '</div>' : '') + '</td>' +
+        '<td><select data-att-field="status">' + selectOptions(statusOptions, s.status) + '</select></td>' +
+        '<td><input type="text" data-att-field="note" value="' + esc(s.note || '') + '" placeholder="Optional note" maxlength="200"></td>' +
+      '</tr>';
+    }).join('');
+
+    body.innerHTML =
+      '<div class="row" style="margin-bottom:14px;align-items:flex-end">' +
+        '<div class="field" style="margin:0"><label>Date</label><input type="date" id="att-date" value="' + esc(data.date) + '"></div>' +
+        '<button type="button" class="btn secondary small" data-act="att-mark-all-present">' + icon('check') + 'Mark all present</button>' +
+      '</div>' +
+      (data.students && data.students.length
+        ? '<div class="tablewrap"><table><thead><tr><th>Student</th><th>Status</th><th>Note</th></tr></thead>' +
+            '<tbody id="att-roster-body">' + rows + '</tbody></table></div>' +
+          '<p style="margin-top:16px"><button type="button" class="btn" data-act="att-save">' + icon('check') + 'Save attendance</button></p>'
+        : '<p class="small muted">No active students in this class yet.</p>');
+  }).catch(attendanceBodyError_);
+}
+
+function loadAttendanceHistory(classId) {
+  api('attendance.classHistory', { classId: classId, from: State.view.attFrom, to: State.view.attTo }).then(function (data) {
+    var body = qs('#att-body'); if (!body) return;
+    var records = data.records || [];
+    body.innerHTML =
+      '<div class="filterbar">' +
+        '<div class="field"><label>From</label><input type="date" id="att-from" value="' + esc(State.view.attFrom) + '"></div>' +
+        '<div class="field"><label>To</label><input type="date" id="att-to" value="' + esc(State.view.attTo) + '"></div>' +
+      '</div>' +
+      (records.length
+        ? '<div class="tablewrap"><table class="responsive"><thead><tr><th>Date</th><th>Student</th><th>Status</th><th>Note</th></tr></thead><tbody>' +
+          records.map(function (rec) {
+            return '<tr>' +
+              '<td data-label="Date">' + esc(fmtDate(rec.date)) + '</td>' +
+              '<td data-label="Student">' + esc(rec.studentName) + '</td>' +
+              '<td data-label="Status">' + attendanceBadgeHtml(rec.status) + '</td>' +
+              '<td data-label="Note" class="small muted">' + esc(rec.note || '—') + '</td>' +
+            '</tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<p class="small muted">No attendance recorded in this range yet.</p>');
+  }).catch(attendanceBodyError_);
+}
+
+function loadAttendanceSummary(classId) {
+  api('attendance.classSummary', { classId: classId, from: State.view.attFrom, to: State.view.attTo }).then(function (data) {
+    var body = qs('#att-body'); if (!body) return;
+    var t = data.totals || {};
+    var students = data.students || [];
+    body.innerHTML =
+      '<div class="grid cols-4" style="margin-bottom:16px">' +
+        statCard('Total Siswa', data.totalStudents || 0, null, 'blue', 'users') +
+        statCard('Hadir', t.present || 0, null, 'green', 'check') +
+        statCard('Terlambat', t.late || 0, null, 'amber', 'clock') +
+        statCard('Persentase Kehadiran', num(t.attendancePercent, 0) + '%', null, 'purple', 'trend') +
+      '</div>' +
+      '<div class="filterbar">' +
+        '<div class="field"><label>From</label><input type="date" id="att-from" value="' + esc(State.view.attFrom) + '"></div>' +
+        '<div class="field"><label>To</label><input type="date" id="att-to" value="' + esc(State.view.attTo) + '"></div>' +
+      '</div>' +
+      (students.length
+        ? '<div class="tablewrap"><table class="responsive"><thead><tr>' +
+            '<th>Student</th><th>Hadir</th><th>Terlambat</th><th>Izin</th><th>Sakit</th><th>Alpa</th><th>%</th>' +
+          '</tr></thead><tbody>' +
+          students.map(function (s) {
+            return '<tr>' +
+              '<td data-label="Student"><strong>' + esc(s.studentName) + '</strong></td>' +
+              '<td data-label="Hadir">' + num(s.present, 0) + '</td>' +
+              '<td data-label="Terlambat">' + num(s.late, 0) + '</td>' +
+              '<td data-label="Izin">' + num(s.excused, 0) + '</td>' +
+              '<td data-label="Sakit">' + num(s.sick, 0) + '</td>' +
+              '<td data-label="Alpa">' + num(s.absent, 0) + '</td>' +
+              '<td data-label="%">' + num(s.attendancePercent, 0) + '%</td>' +
+            '</tr>';
+          }).join('') + '</tbody></table></div>'
+        : '<p class="small muted">No students in this class yet.</p>');
+  }).catch(attendanceBodyError_);
+}
+
+Actions['att-tab'] = function (btn) {
+  location.hash = '#/attendance/' + State.view.attClassId + '/' + btn.getAttribute('data-tab');
+};
+document.addEventListener('change', function (event) {
+  var el = event.target;
+  if (el.id === 'att-class') {
+    location.hash = '#/attendance/' + el.value + '/' + (State.view.attTab || 'mark');
+    return;
+  }
+  if (el.id === 'att-date') {
+    State.view.attDate = el.value;
+    loadAttendanceMarkForm(State.view.attClassId);
+    return;
+  }
+  if (el.id === 'att-from' || el.id === 'att-to') {
+    if (el.id === 'att-from') State.view.attFrom = el.value; else State.view.attTo = el.value;
+    loadAttendanceTab(State.view.attClassId, State.view.attTab);
+  }
+});
+Actions['att-mark-all-present'] = function () {
+  qsa('#att-roster-body [data-att-field="status"]').forEach(function (sel) { sel.value = 'PRESENT'; });
+};
+Actions['att-save'] = function (btn) {
+  var classId = State.view.attClassId;
+  var dateEl = qs('#att-date');
+  var date = dateEl ? dateEl.value : State.view.attDate;
+  var entries = [];
+  qsa('#att-roster-body tr').forEach(function (tr) {
+    var statusEl = tr.querySelector('[data-att-field="status"]');
+    var noteEl = tr.querySelector('[data-att-field="note"]');
+    var status = statusEl ? statusEl.value : '';
+    if (!status) return;
+    entries.push({ studentId: tr.getAttribute('data-student'), status: status, note: noteEl ? noteEl.value : '' });
+  });
+  if (!entries.length) { toast('Set a status for at least one student.', 'error'); return; }
+  busy(btn, true, 'Saving…');
+  api('attendance.mark', { classId: classId, date: date, entries: entries })
+    .then(function (result) {
+      busy(btn, false);
+      var n = result.created + result.updated;
+      toast('Attendance saved for ' + n + ' student' + (n === 1 ? '' : 's') + '.', 'success');
+      State.view.attDate = date;
+      loadAttendanceMarkForm(classId);
+    })
+    .catch(function (error) { busy(btn, false); toast(error.message, 'error'); });
+};
+
+function viewMyAttendance() {
+  showLoading();
+  api('my.attendance', {}).then(function (data) {
+    var t = data.totals || {};
+    var records = data.records || [];
+    var table = records.length
+      ? '<div class="tablewrap"><table class="responsive"><thead><tr><th>Date</th><th>Class</th><th>Status</th><th>Note</th></tr></thead><tbody>' +
+        records.map(function (r) {
+          return '<tr>' +
+            '<td data-label="Date">' + esc(fmtDate(r.date)) + '</td>' +
+            '<td data-label="Class">' + esc(r.className) + '</td>' +
+            '<td data-label="Status">' + attendanceBadgeHtml(r.status) + '</td>' +
+            '<td data-label="Note" class="small muted">' + esc(r.note || '—') + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>'
+      : '<p class="small muted">No attendance recorded yet.</p>';
+
+    setView(
+      pageHead('Attendance', 'Your attendance record.') +
+      '<div class="grid cols-4">' +
+        statCard('Persentase Kehadiran', num(t.attendancePercent, 0) + '%', null, 'green', 'trend') +
+        statCard('Hadir', t.present || 0, null, 'blue', 'check') +
+        statCard('Terlambat', t.late || 0, null, 'amber', 'clock') +
+        statCard('Alpa', t.absent || 0, null, 'rose', 'clipboard') +
+      '</div>' +
+      '<div class="grid cols-2" style="margin-top:16px">' +
+        statCard('Izin', t.excused || 0, null, 'purple', 'clipboard') +
+        statCard('Sakit', t.sick || 0, null, 'purple', 'clipboard') +
+      '</div>' +
+      '<div class="section"><h2>History</h2>' + table + '</div>'
+    );
+  }).catch(showError);
+}
+
 function viewAssessment() {
   showLoading();
   api('assessment.overview', {}).then(function (data) {
@@ -3536,6 +3772,7 @@ function viewQuizRunner(r) {
     setView(
       pageHead(quiz.title, 'Attempt ' + num(quiz.attemptNumber, 1) + ' of ' + num(quiz.maxAttempts, 1)) +
       (quiz.description ? '<p class="muted">' + esc(quiz.description) + '</p>' : '') +
+      (data.resumed ? '<div class="notice">You already had this quiz open. Picking up where you left off.</div>' : '') +
       '<div class="quizbar" id="quiz-progress" data-total="' + questions.length + '">' +
         '<span class="small muted" id="quiz-progress-label">Answered 0 of ' + questions.length + '</span>' +
         '<span class="track"><span style="width:0%"></span></span>' +
@@ -3551,7 +3788,15 @@ function viewQuizRunner(r) {
       '</form>'
     );
 
-    if (quiz.timeLimitMinutes) startQuizCountdown(num(quiz.timeLimitMinutes, 0) * 60);
+    if (quiz.timeLimitMinutes) {
+      // The deadline is startedAt + the time limit, not "full time from whenever this page
+      // loaded" - resuming an attempt that has been open a while must show the time actually
+      // left, not reset the clock. The backend enforces the real deadline regardless; this only
+      // keeps the on-screen countdown honest.
+      var totalSeconds = num(quiz.timeLimitMinutes, 0) * 60;
+      var elapsedSeconds = data.startedAt ? Math.max(0, Math.floor((Date.now() - new Date(data.startedAt).getTime()) / 1000)) : 0;
+      startQuizCountdown(Math.max(0, totalSeconds - elapsedSeconds));
+    }
   }).catch(showError);
 }
 
