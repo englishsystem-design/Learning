@@ -372,6 +372,19 @@ td.rowacts{white-space:nowrap}
   .barlist .barrow{grid-template-columns:104px 1fr 44px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* PDF material */
+.pdfbox{border:1px dashed var(--line-strong);background:var(--panel);border-radius:var(--r);padding:12px 14px;margin-top:8px}
+.pdfbox .pdfname{font-weight:600;word-break:break-all}
+.upstatus{background:var(--paper);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;margin-bottom:12px}
+.upstatus .meter{height:10px}
+.upstatus.err{border-color:#EFD2D6;background:var(--rose-soft)}
+.upstatus.okk{border-color:#BFE3D2;background:var(--green-soft)}
+.pdfviewer{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--paper);margin-top:10px}
+.pdfviewer .pvhead{padding:10px 14px;font-weight:600;border-bottom:1px solid var(--line);background:var(--panel)}
+.pdfviewer iframe{display:block;width:100%;height:72vh;min-height:420px;border:0;background:#EEF1F6}
+.pdfviewer img,.pdfviewer video{display:block;max-width:100%;margin:0 auto}
+.pdfviewer .pvfoot{padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--line);background:var(--panel)}
 </style>
 </head>
 <body>
@@ -393,7 +406,8 @@ var API_BASE_URL = 'https://script.google.com/macros/s/AKfycbztZU5sKT5TxfXZLL9Km
 var APP = {
   timeoutMs: 45000,
   storageKey: 'smk_english_token',
-  maxUploadBytes: 8 * 1024 * 1024
+  maxUploadBytes: 8 * 1024 * 1024,
+  uploadTimeoutMs: 180000
 };
 
 /* --- 2. STATE --------------------------------------------------------- */
@@ -467,7 +481,7 @@ function blockIcon(type) {
     INTRODUCTION: 'sparkle', OBJECTIVE: 'target', VOCABULARY: 'book', EXPLANATION: 'text',
     EXAMPLE: 'text', READING: 'book', LISTENING: 'audio', SPEAKING: 'mic', WRITING: 'pen',
     PRACTICE: 'checksquare', ASSIGNMENT: 'clipboard', ASSESSMENT: 'award', VIDEO: 'video',
-    IMAGE: 'image', AUDIO: 'audio', DOWNLOAD: 'file', TEXT: 'text'
+    IMAGE: 'image', AUDIO: 'audio', DOWNLOAD: 'file', TEXT: 'text', MATERIAL: 'file', QUIZ: 'checksquare'
   };
   return map[type] || 'text';
 }
@@ -610,6 +624,11 @@ var ERROR_TEXT = {
   AI_PROVIDER_ERROR: 'The AI assistant is unavailable.',
   AI_QUOTA_EXCEEDED: 'The AI daily limit has been reached.',
   STORAGE_ERROR: 'The file could not be stored.',
+  UNAUTHORIZED: 'Sign in to continue.',
+  INVALID_FILE_TYPE: 'Hanya file PDF (.pdf) yang dapat diunggah.',
+  FILE_TOO_LARGE: 'Ukuran file melebihi 8 MB.',
+  UPLOAD_FAILED: 'Upload gagal. Silakan coba lagi.',
+  MATERIAL_NOT_FOUND: 'Materi tidak ditemukan.',
   DATABASE_ERROR: 'The database is unavailable.',
   INTERNAL_ERROR: 'Something went wrong on the server.',
   NETWORK_ERROR: 'The server cannot be reached. Check your connection and the API address.',
@@ -673,6 +692,82 @@ function endSession(message) {
   closeModal();
   renderLogin(message || 'Sign in to continue.');
 }
+
+/**
+ * Same contract as api(), but over XMLHttpRequest so the browser reports real upload progress.
+ * onProgress(percent 0-100) is called while the request body is being sent.
+ */
+function apiUpload(action, params, requestId, onProgress) {
+  if (!API_BASE_URL || API_BASE_URL.indexOf('PASTE_YOUR') === 0) {
+    return Promise.reject(new ApiError('NETWORK_ERROR', 'The API address has not been set in index.html.'));
+  }
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', API_BASE_URL, true);
+    xhr.timeout = APP.uploadTimeoutMs;
+    xhr.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = function (e) {
+        if (e.lengthComputable && e.total > 0) onProgress(Math.round(e.loaded / e.total * 100));
+      };
+    }
+    xhr.onload = function () {
+      var payload;
+      try { payload = JSON.parse(xhr.responseText); }
+      catch (e) { reject(new ApiError('INTERNAL_ERROR', 'The server returned an unreadable response.')); return; }
+      if (payload && payload.success) { resolve(payload.data || {}); return; }
+      var code = (payload && payload.error && payload.error.code) || 'INTERNAL_ERROR';
+      var message = (payload && payload.error && payload.error.message) || ERROR_TEXT[code] || ERROR_TEXT.INTERNAL_ERROR;
+      if (code === 'AUTH_EXPIRED' || code === 'AUTH_INVALID' || code === 'AUTH_REQUIRED') endSession(message);
+      reject(new ApiError(code, message));
+    };
+    xhr.onerror = function () { reject(new ApiError('NETWORK_ERROR', ERROR_TEXT.NETWORK_ERROR)); };
+    xhr.ontimeout = function () { reject(new ApiError('TIMEOUT', ERROR_TEXT.TIMEOUT)); };
+    xhr.send(JSON.stringify({ action: action, token: State.token || '', requestId: requestId || uuid(), params: params || {} }));
+  });
+}
+
+function formatBytes(n) {
+  n = num(n, 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+/** Client-side PDF check (the backend repeats every one of these). Resolves to an error text or ''. */
+function checkPdfFile(file) {
+  return new Promise(function (resolve) {
+    if (!file) { resolve('Pilih file PDF terlebih dahulu.'); return; }
+    if (!/\.pdf$/i.test(file.name || '')) { resolve('Hanya file PDF (.pdf) yang dapat diunggah.'); return; }
+    if (file.type && file.type !== 'application/pdf') { resolve('Tipe file harus application/pdf.'); return; }
+    if (file.size <= 0) { resolve('File kosong.'); return; }
+    if (file.size > APP.maxUploadBytes) { resolve('Ukuran file melebihi 8 MB (' + formatBytes(file.size) + ').'); return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var head = new Uint8Array(reader.result || new ArrayBuffer(0));
+      var ok = false;
+      for (var i = 0; i + 4 < head.length; i++) {
+        if (head[i] === 37 && head[i + 1] === 80 && head[i + 2] === 68 && head[i + 3] === 70 && head[i + 4] === 45) { ok = true; break; }
+      }
+      resolve(ok ? '' : 'Isi file bukan PDF yang valid.');
+    };
+    reader.onerror = function () { resolve('File tidak dapat dibaca.'); };
+    reader.readAsArrayBuffer(file.slice(0, 1024));
+  });
+}
+
+function base64ToBlobUrl(base64, mime) {
+  var bin = atob(base64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+}
+var BlobUrls = [];
+function revokeBlobUrls() {
+  BlobUrls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) {} });
+  BlobUrls = [];
+}
+window.addEventListener('hashchange', revokeBlobUrls);
 
 /* --- 5. NAVIGATION ---------------------------------------------------- */
 var NAV = {
@@ -1196,8 +1291,11 @@ Actions['ai-run'] = function (form) {
   var out = qs('#ai-result');
   out.innerHTML = '<div class="loading">Asking the assistant…</div>';
   busy(button, true, 'Asking…');
-  api('ai.assist', { feature: values.feature, input: values.input })
+  var aiSig = values.feature + '|' + values.input;
+  var aiRid = (State.aiRetry && State.aiRetry.sig === aiSig) ? State.aiRetry.id : uuid();
+  api('ai.assist', { feature: values.feature, input: values.input }, aiRid)
     .then(function (data) {
+      State.aiRetry = null;
       busy(button, false);
       var pre = document.createElement('div');
       pre.className = 'aiout';
@@ -1208,6 +1306,9 @@ Actions['ai-run'] = function (form) {
     })
     .catch(function (error) {
       busy(button, false);
+      // A timeout / dropped connection may still have reached the server: retry with the SAME
+      // requestId so the server returns the stored answer instead of calling the AI (and charging quota) again.
+      State.aiRetry = (error && (error.code === 'NETWORK_ERROR' || error.code === 'TIMEOUT')) ? { sig: aiSig, id: aiRid } : null;
       out.innerHTML = '<div class="notice error">' + esc(error.message) + '</div>';
     });
 };
@@ -1476,7 +1577,7 @@ Actions['unit-status'] = function (btn) {
 
 /* --- Lessons ----------------------------------------------------------- */
 var BLOCK_TYPES = ['INTRODUCTION','OBJECTIVE','VOCABULARY','EXPLANATION','EXAMPLE','READING','LISTENING',
-  'SPEAKING','PRACTICE','ASSIGNMENT','ASSESSMENT','VIDEO','IMAGE','AUDIO','MATERIAL'];
+  'SPEAKING','PRACTICE','ASSIGNMENT','ASSESSMENT','VIDEO','IMAGE','AUDIO','MATERIAL','TEXT','QUIZ'];
 var SKILLS = ['READING','LISTENING','GRAMMAR','VOCABULARY','SPEAKING','WRITING'];
 var VOCATIONALS = ['GENERAL','AUTOMOTIVE','SOFTWARE_ENGINEERING','ELECTRICAL_ENGINEERING','HOSPITALITY',
   'ACCOUNTING','CULINARY','MECHANICAL_ENGINEERING'];
@@ -1579,6 +1680,15 @@ Actions['lesson-create'] = function (form) {
 };
 
 /* --- Lesson builder ---------------------------------------------------- */
+function blockFromServer(b) {
+  return { id: b.id, type: b.type, title: b.title, content: b.content,
+    materialId: b.materialId || '', fileName: b.fileName || '', mimeType: b.mimeType || '', size: num(b.size, 0) };
+}
+/** Only these fields go to the server. Drive file IDs / URLs never exist in the browser. */
+function blockToServer(b) {
+  return { id: b.id, type: b.type, title: b.title, content: b.content, materialId: b.materialId || '' };
+}
+
 function viewLessonBuilder(lessonId) {
   showLoading('Opening lesson…');
   Promise.all([api('lesson.get', { id: lessonId }), loadClasses()]).then(function (results) {
@@ -1586,7 +1696,7 @@ function viewLessonBuilder(lessonId) {
     var classes = results[1];
     var l = data.lesson;
     State.view.lesson = l;
-    State.view.blocks = data.blocks.map(function (b) { return { id: b.id, type: b.type, title: b.title, content: b.content, fileId: b.fileId, fileName: b.fileName, fileUrl: b.fileUrl }; });
+    State.view.blocks = data.blocks.map(blockFromServer);
     State.view.vocabulary = data.vocabulary;
     State.view.classes = classes;
 
@@ -1622,9 +1732,11 @@ function renderLessonTab(tab) {
     panel.innerHTML =
       '<div class="row" style="margin-bottom:12px">' +
         '<button class="btn secondary" data-act="block-add">Add block</button>' +
+        '<button class="btn secondary" data-act="pdf-new" id="pdf-new-btn">Upload PDF Material</button>' +
+        '<input type="file" id="pdf-new-input" accept=".pdf,application/pdf" style="display:none">' +
         '<button class="btn" data-act="blocks-save">Save blocks</button>' +
         '<span class="small muted">Blocks keep their ID when you reorder or edit them.</span>' +
-      '</div><div id="blocklist"></div>';
+      '</div><div id="pdf-status"></div><div id="blocklist"></div>';
     renderBlocks();
   } else if (tab === 'details') {
     panel.innerHTML = '<div class="card">' +
@@ -1701,14 +1813,127 @@ function renderBlocks() {
         '<button class="btn danger small" data-act="block-remove" data-index="' + index + '">Delete</button>' +
       '</div>' +
       '<textarea data-block-field="content" data-index="' + index + '" placeholder="Block content" aria-label="Block content">' + esc(b.content) + '</textarea>' +
-      '<div class="row" style="margin-top:8px">' +
-        '<input type="file" data-block-file="' + index + '" aria-label="Attach a file to this block" style="max-width:280px">' +
-        '<button class="btn secondary small" data-act="block-upload" data-index="' + index + '">Attach file</button>' +
-        (b.fileName ? '<span class="small">Attached: ' + esc(b.fileName) + '</span>' : '<span class="small muted">No file attached</span>') +
-      '</div>' +
+      blockFileArea(b, index) +
     '</div>';
   }).join('');
 }
+function blockFileArea(b, index) {
+  var busyNow = !!State.view.uploading;
+  var dis = busyNow ? ' disabled' : '';
+  if (b.type === 'MATERIAL') {
+    if (!b.id) {
+      return '<div class="pdfbox"><span class="small muted">Simpan blok ini terlebih dahulu (Save blocks), lalu unggah PDF-nya.</span></div>';
+    }
+    var has = !!b.materialId;
+    return '<div class="pdfbox">' +
+      (has
+        ? '<div class="pdfname">' + icon('file') + ' ' + esc(b.fileName) + '</div>' +
+          '<div class="small muted">' + esc(formatBytes(b.size)) + ' · PDF · tersimpan privat di Google Drive</div>'
+        : '<div class="small muted">Belum ada PDF pada blok ini.</div>') +
+      '<div class="row" style="margin-top:8px">' +
+        '<button class="btn secondary small" data-act="pdf-pick" data-index="' + index + '"' + dis + '>' + (has ? 'Ganti PDF' : 'Upload PDF') + '</button>' +
+        '<input type="file" data-pdf-input="' + index + '" accept=".pdf,application/pdf" style="display:none">' +
+        (has ? '<button class="btn danger small" data-act="pdf-remove" data-index="' + index + '"' + dis + '>Hapus PDF</button>' : '') +
+      '</div></div>';
+  }
+  if (b.materialId || b.fileName) {
+    return '<div class="row" style="margin-top:8px"><span class="small">Lampiran: ' + esc(b.fileName || 'file') + '</span></div>';
+  }
+  return '';
+}
+
+function setPdfStatus(kind, html) {
+  var box = qs('#pdf-status');
+  if (!box) return;
+  box.innerHTML = html ? '<div class="upstatus' + (kind === 'err' ? ' err' : kind === 'ok' ? ' okk' : '') + '" role="status">' + html + '</div>' : '';
+}
+function progressHtml(label, percent) {
+  return '<div><strong>' + esc(label) + '</strong></div>' +
+    '<div class="meter blue"><span style="width:' + pct(percent) + '%"></span></div>' +
+    '<div class="small muted">' + pct(percent) + '%</div>';
+}
+function setUploading(isBusy) {
+  State.view.uploading = !!isBusy;
+  qsa('[data-act="pdf-new"],[data-act="pdf-pick"],[data-act="pdf-remove"],[data-act="blocks-save"],[data-act="block-add"]').forEach(function (b) { b.disabled = !!isBusy; });
+}
+
+/** Shared upload flow for both "new PDF block" and "replace PDF in block". */
+function runPdfUpload(file, blockIndex) {
+  if (State.view.uploading) return;                      // prevents double click / double upload
+  var block = (blockIndex === null) ? null : State.view.blocks[blockIndex];
+  var replacing = !!(block && block.materialId);
+  checkPdfFile(file).then(function (problem) {
+    if (problem) { setPdfStatus('err', esc(problem)); toast(problem, 'error'); return; }
+    if (replacing && !confirm('Ganti PDF "' + block.fileName + '" dengan "' + file.name + '"?\nSiswa akan langsung melihat file yang baru.')) return;
+    setUploading(true);
+    setPdfStatus('', progressHtml('Membaca ' + file.name + '…', 5));
+    return fileToBase64(file).then(function (base64) {
+      var rid = uuid();                                  // one requestId per upload: a network retry can never store the file twice
+      return apiUpload('material.uploadPdf', {
+        lessonId: State.view.lesson.id,
+        blockId: block ? block.id : '',
+        fileName: file.name, mimeType: 'application/pdf', base64: base64
+      }, rid, function (percent) {
+        setPdfStatus('', progressHtml(percent >= 100 ? 'Menyimpan ke Google Drive…' : 'Uploading PDF…', percent));
+      });
+    }).then(function (data) {
+      setUploading(false);
+      var nb = blockFromServer(data.block);
+      if (block) { State.view.blocks[blockIndex] = Object.assign({}, State.view.blocks[blockIndex], { materialId: nb.materialId, fileName: nb.fileName, mimeType: nb.mimeType, size: nb.size }); }
+      else { State.view.blocks.push(nb); }
+      renderBlocks();
+      Cache.lessons = null;
+      setPdfStatus('ok', '<strong>Upload berhasil</strong><div>' + esc(nb.fileName) + '</div><div class="small muted">' + esc(formatBytes(nb.size)) + (data.replaced ? ' · PDF lama diganti' : ' · blok MATERIAL dibuat') + '</div>');
+      toast('PDF berhasil diunggah.', 'success');
+    });
+  }).catch(function (error) {
+    setUploading(false);
+    var msg = (error && error.message) ? error.message : 'Upload gagal. Silakan coba lagi.';
+    setPdfStatus('err', '<strong>Upload gagal</strong><div>' + esc(msg) + '</div>');
+    toast(msg, 'error');
+  });
+}
+
+Actions['pdf-new'] = function () {
+  if (State.view.uploading) return;
+  var input = qs('#pdf-new-input');
+  if (!input) return;
+  input.value = '';
+  input.onchange = function () { if (input.files && input.files.length) { syncBlockFields(); runPdfUpload(input.files[0], null); } };
+  input.click();
+};
+Actions['pdf-pick'] = function (btn) {
+  if (State.view.uploading) return;
+  var index = num(btn.getAttribute('data-index'), 0);
+  var input = qs('[data-pdf-input="' + index + '"]');
+  if (!input) return;
+  input.value = '';
+  input.onchange = function () { if (input.files && input.files.length) { syncBlockFields(); runPdfUpload(input.files[0], index); } };
+  input.click();
+};
+Actions['pdf-remove'] = function (btn) {
+  if (State.view.uploading) return;
+  syncBlockFields();
+  var index = num(btn.getAttribute('data-index'), 0);
+  var block = State.view.blocks[index];
+  if (!block || !block.id) return;
+  if (!confirm('Hapus PDF "' + block.fileName + '" dari blok ini?\nSiswa tidak akan bisa membukanya lagi.')) return;
+  setUploading(true);
+  setPdfStatus('', progressHtml('Menghapus PDF…', 60));
+  api('material.removePdf', { lessonId: State.view.lesson.id, blockId: block.id }).then(function (data) {
+    setUploading(false);
+    var nb = blockFromServer(data.block);
+    State.view.blocks[index] = Object.assign({}, block, { materialId: '', fileName: '', mimeType: '', size: 0 });
+    renderBlocks();
+    setPdfStatus('ok', '<strong>PDF dihapus</strong>');
+    toast('PDF dihapus dari blok.', 'success');
+  }).catch(function (error) {
+    setUploading(false);
+    setPdfStatus('err', '<strong>Gagal menghapus</strong><div>' + esc(error.message) + '</div>');
+    toast(error.message, 'error');
+  });
+};
+
 function syncBlockFields() {
   qsa('[data-block-field]').forEach(function (el) {
     var index = num(el.getAttribute('data-index'), -1);
@@ -1718,7 +1943,7 @@ function syncBlockFields() {
 }
 Actions['block-add'] = function () {
   syncBlockFields();
-  State.view.blocks.push({ id: '', type: 'EXPLANATION', title: 'New block', content: '', fileId: '', fileName: '', fileUrl: '' });
+  State.view.blocks.push({ id: '', type: 'EXPLANATION', title: 'New block', content: '', materialId: '', fileName: '', mimeType: '', size: 0 });
   renderBlocks();
 };
 Actions['block-remove'] = function (btn) {
@@ -1738,35 +1963,12 @@ Actions['block-down'] = function (btn) {
   if (i < State.view.blocks.length - 1) { var t = State.view.blocks[i + 1]; State.view.blocks[i + 1] = State.view.blocks[i]; State.view.blocks[i] = t; }
   renderBlocks();
 };
-Actions['block-upload'] = function (btn) {
-  var index = num(btn.getAttribute('data-index'), 0);
-  var input = qs('[data-block-file="' + index + '"]');
-  if (!input || !input.files || !input.files.length) { toast('Choose a file first.', 'error'); return; }
-  var file = input.files[0];
-  if (file.size > APP.maxUploadBytes) { toast('That file is larger than 8 MB.', 'error'); return; }
-  syncBlockFields();
-  busy(btn, true, 'Uploading…');
-  fileToBase64(file).then(function (base64) {
-    return api('material.upload', {
-      entityType: 'BLOCK', entityId: State.view.lesson.id,
-      fileName: file.name, mimeType: file.type || 'application/octet-stream', base64: base64
-    });
-  }).then(function (data) {
-    State.view.blocks[index].fileId = data.material.fileId;
-    State.view.blocks[index].fileName = data.material.fileName;
-    State.view.blocks[index].fileUrl = data.material.driveUrl;
-    renderBlocks();
-    toast('File attached. Save the blocks to keep it.', 'success');
-  }).catch(function (error) { busy(btn, false); toast(error.message, 'error'); });
-};
 Actions['blocks-save'] = function (btn) {
   syncBlockFields();
   busy(btn, true, 'Saving…');
-  api('lesson.saveBlocks', { lessonId: State.view.lesson.id, blocks: State.view.blocks })
+  api('lesson.saveBlocks', { lessonId: State.view.lesson.id, blocks: State.view.blocks.map(blockToServer) })
     .then(function (data) {
-      State.view.blocks = data.blocks.map(function (b) {
-        return { id: b.id, type: b.type, title: b.title, content: b.content, fileId: b.fileId, fileName: b.fileName, fileUrl: b.fileUrl };
-      });
+      State.view.blocks = data.blocks.map(blockFromServer);
       busy(btn, false);
       renderBlocks();
       toast('Blocks saved.', 'success');
@@ -3440,10 +3642,10 @@ function viewStudentLesson(lessonId) {
     var blockHtml = blocks.length
       ? blocks.map(function (b) {
           var media = '';
-          if (b.fileUrl && b.type === 'IMAGE') {
-            media = '<p><a href="' + esc(b.fileUrl) + '" target="_blank" rel="noopener">View image: ' + esc(b.fileName || 'image') + '</a></p>';
+          if (b.materialId) {
+            media = materialBlockHtml(b);
           } else if (b.fileUrl) {
-            media = '<p><a href="' + esc(b.fileUrl) + '" target="_blank" rel="noopener">Open ' + esc(b.fileName || 'attached file') + '</a></p>';
+            media = '<p><a href="' + esc(b.fileUrl) + '" target="_blank" rel="noopener noreferrer">Open ' + esc(b.fileName || 'link') + '</a></p>';
           }
           return '<div class="lessonblock">' +
             '<div class="kind">' + icon(blockIcon(b.type)) + esc(titleCase(b.type)) + '</div>' +
@@ -3477,6 +3679,70 @@ function viewStudentLesson(lessonId) {
     );
   }).catch(showError);
 }
+/* --- Secure material viewer (student) ---------------------------------- */
+function materialBlockHtml(b) {
+  var done = (b.materialStatus === 'COMPLETED');
+  var statusLabel = done ? 'Selesai' : (b.materialStatus === 'IN_PROGRESS' ? 'Sedang dibaca' : 'Belum dibuka');
+  return '<div class="pdfbox" data-material-box="' + esc(b.materialId) + '">' +
+    '<div class="spread"><div><div class="pdfname">' + icon('file') + ' ' + esc(b.fileName) + '</div>' +
+      '<div class="small muted">' + esc(formatBytes(b.size)) + '</div></div>' +
+      '<span class="badge ' + (done ? 'completed' : 'info') + '" data-material-status="' + esc(b.materialId) + '">' + esc(statusLabel) + '</span></div>' +
+    '<div class="row" style="margin-top:10px">' +
+      '<button class="btn small" data-act="material-open" data-id="' + esc(b.materialId) + '">Buka materi</button>' +
+      '<button class="btn secondary small" data-act="material-complete" data-id="' + esc(b.materialId) + '"' + (done ? ' disabled' : '') + '>✓ Tandai materi selesai</button>' +
+    '</div>' +
+    '<div data-material-view="' + esc(b.materialId) + '"></div></div>';
+}
+
+Actions['material-open'] = function (btn) {
+  var id = btn.getAttribute('data-id');
+  var holder = qs('[data-material-view="' + id + '"]');
+  if (!holder || btn.disabled) return;
+  if (holder.getAttribute('data-loaded') === '1') {                 // toggle an already-loaded viewer
+    holder.style.display = (holder.style.display === 'none') ? '' : 'none';
+    btn.textContent = (holder.style.display === 'none') ? 'Buka materi' : 'Tutup materi';
+    return;
+  }
+  busy(btn, true, 'Membuka…');
+  holder.innerHTML = '<div class="loading">Memuat materi…</div>';
+  api('material.download', { materialId: id }).then(function (data) {
+    var url = base64ToBlobUrl(data.base64, data.mimeType);
+    BlobUrls.push(url);
+    var mime = String(data.mimeType || '');
+    var body;
+    if (mime === 'application/pdf') body = '<iframe src="' + url + '" title="' + esc(data.fileName) + '"></iframe>';
+    else if (mime.indexOf('image/') === 0) body = '<img src="' + url + '" alt="' + esc(data.fileName) + '">';
+    else if (mime.indexOf('video/') === 0) body = '<video src="' + url + '" controls playsinline></video>';
+    else if (mime.indexOf('audio/') === 0) body = '<audio src="' + url + '" controls style="width:100%"></audio>';
+    else body = '<p class="small muted" style="padding:14px">Pratinjau tidak tersedia untuk tipe file ini. Gunakan tombol Download.</p>';
+    holder.innerHTML = '<div class="pdfviewer"><div class="pvhead">Materi Pembelajaran — ' + esc(data.fileName) + '</div>' + body +
+      '<div class="pvfoot">' +
+        '<a class="btn secondary small" href="' + url + '" target="_blank" rel="noopener">Buka di tab baru</a>' +
+        '<a class="btn secondary small" href="' + url + '" download="' + esc(data.fileName) + '">Download</a>' +
+      '</div></div>';
+    holder.setAttribute('data-loaded', '1');
+    busy(btn, false);
+    btn.textContent = 'Tutup materi';
+    var badge = qs('[data-material-status="' + id + '"]');
+    if (badge && badge.textContent === 'Belum dibuka') badge.textContent = 'Sedang dibaca';
+  }).catch(function (error) {
+    busy(btn, false);
+    holder.innerHTML = '<div class="notice error">' + esc(error.message) + '</div>';
+  });
+};
+
+Actions['material-complete'] = function (btn) {
+  var id = btn.getAttribute('data-id');
+  busy(btn, true, 'Menyimpan…');
+  api('my.materialComplete', { materialId: id }).then(function () {
+    var badge = qs('[data-material-status="' + id + '"]');
+    if (badge) { badge.textContent = 'Selesai'; badge.className = 'badge completed'; }
+    btn.textContent = '✓ Tandai materi selesai';
+    btn.disabled = true;
+    toast('Materi ditandai selesai.', 'success');
+  }).catch(function (error) { busy(btn, false); toast(error.message, 'error'); });
+};
+
 Actions['lesson-complete'] = function (btn) {
   var id = btn.getAttribute('data-id');
   busy(btn, true, 'Saving…');
@@ -3698,6 +3964,7 @@ Actions['practice-start'] = function (form) {
       return;
     }
     State.view.drill = data.questions;
+    State.view.drillSession = data.sessionId || '';
     body.innerHTML = '<form data-act="practice-check">' +
       data.questions.map(function (q, i) { return practiceQuestionHtml(q, i); }).join('') +
       '<button class="btn" type="submit">Check my answers</button></form>' +
@@ -3735,7 +4002,7 @@ Actions['practice-check'] = function (form) {
     answers[q.id] = text ? text.value : '';
   });
   busy(button, true, 'Checking…');
-  api('my.practiceCheck', { answers: answers }).then(function (data) {
+  api('my.practiceCheck', { sessionId: State.view.drillSession || '', answers: answers }).then(function (data) {
     busy(button, false);
     var out = qs('#drill-result');
     out.innerHTML =
