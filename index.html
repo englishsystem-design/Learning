@@ -325,9 +325,7 @@ td.rowacts{white-space:nowrap}
 .timer{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums;font-weight:650;color:var(--ink);
   background:var(--amber-soft);border:1px solid #EEDCBC;border-radius:999px;padding:5px 12px;font-size:.88rem}
 
-/* ---------- ai, tabs, pager ---------- */
-.aipanel{background:var(--paper);border:1px solid var(--line);border-radius:var(--r);padding:20px;box-shadow:var(--shadow-1)}
-.aiout{white-space:pre-wrap;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;font-size:.92rem;line-height:1.65;max-height:420px;overflow:auto}
+/* ---------- tabs, pager ---------- */
 .tabs{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap;background:var(--paper);border:1px solid var(--line);
   border-radius:999px;padding:5px;width:fit-content;max-width:100%;box-shadow:var(--shadow-1)}
 .tabs button{background:none;border:0;padding:8px 16px;border-radius:999px;cursor:pointer;font:inherit;font-size:.87rem;color:var(--muted);font-weight:500}
@@ -414,7 +412,6 @@ var APP = {
 var State = {
   token: null,
   user: null,          // filled from the backend only, never from storage
-  ai: { available: false, features: [] },
   booted: false,
   view: {}             // scratch space for the active view
 };
@@ -618,11 +615,6 @@ var ERROR_TEXT = {
   DUPLICATE: 'That already exists.',
   CONFLICT: 'Someone changed this at the same time. Reload and try again.',
   RATE_LIMITED: 'You have reached the limit for now.',
-  AI_DISABLED: 'The AI assistant is switched off.',
-  AI_NOT_CONFIGURED: 'The AI assistant is not configured.',
-  AI_TIMEOUT: 'The AI assistant did not respond.',
-  AI_PROVIDER_ERROR: 'The AI assistant is unavailable.',
-  AI_QUOTA_EXCEEDED: 'The AI daily limit has been reached.',
   STORAGE_ERROR: 'The file could not be stored.',
   UNAUTHORIZED: 'Sign in to continue.',
   INVALID_FILE_TYPE: 'Hanya file PDF (.pdf) yang dapat diunggah.',
@@ -1035,7 +1027,6 @@ function boot() {
 
 function startApp() {
   renderShell();
-  loadAiStatus();
   var home = State.user.role === 'TEACHER' ? '#/dashboard' : '#/home';
   if (!location.hash || location.hash === '#' || location.hash === '#/') {
     location.hash = home;          // triggers the router through hashchange
@@ -1043,12 +1034,6 @@ function startApp() {
     route();
   }
   State.booted = true;
-}
-
-function loadAiStatus() {
-  api('ai.status', {})
-    .then(function (data) { State.ai = data; })
-    .catch(function () { State.ai = { available: false, features: [] }; });
 }
 
 function parseHash() {
@@ -1261,57 +1246,6 @@ function viewProfile() {
     );
   }).catch(showError);
 }
-
-/* --- 13. AI PANEL (shared) -------------------------------------------- */
-function aiPanel(featureOptions, placeholder) {
-  if (!State.ai || !State.ai.available) {
-    return '<div class="card"><h3>AI assistant</h3><p class="small muted">' +
-      'The AI assistant is switched off or not configured. Everything else on this page works normally.</p></div>';
-  }
-  return '<div class="aipanel">' +
-    '<h3>AI assistant</h3>' +
-    (State.user.role === 'TEACHER'
-      ? '<p class="small muted">Anything produced here is a draft. Review and edit it, then save it yourself.</p>'
-      : '<p class="small muted">Use this to understand a point. It helps you think; it does not do your work.</p>') +
-    '<form data-act="ai-run">' +
-      '<div class="fieldrow">' +
-        '<div class="field"><label for="ai-feature">What do you need?</label>' +
-          '<select id="ai-feature" name="feature">' + selectOptions(featureOptions) + '</select></div>' +
-        '<div class="field" style="display:flex;align-items:flex-end"><button class="btn" type="submit">Ask</button></div>' +
-      '</div>' +
-      '<div class="field"><label for="ai-input">Your text</label>' +
-        '<textarea id="ai-input" name="input" placeholder="' + esc(placeholder || '') + '" required></textarea></div>' +
-    '</form>' +
-    '<div id="ai-result"></div>' +
-  '</div>';
-}
-Actions['ai-run'] = function (form) {
-  var values = formValues(form);
-  var button = qs('button[type=submit]', form);
-  var out = qs('#ai-result');
-  out.innerHTML = '<div class="loading">Asking the assistant…</div>';
-  busy(button, true, 'Asking…');
-  var aiSig = values.feature + '|' + values.input;
-  var aiRid = (State.aiRetry && State.aiRetry.sig === aiSig) ? State.aiRetry.id : uuid();
-  api('ai.assist', { feature: values.feature, input: values.input }, aiRid)
-    .then(function (data) {
-      State.aiRetry = null;
-      busy(button, false);
-      var pre = document.createElement('div');
-      pre.className = 'aiout';
-      pre.textContent = data.text;            // plain text only; AI output is never injected as HTML
-      out.innerHTML = (data.isDraft ? '<div class="notice warn">Draft only. Nothing has been saved. Copy what you want into a lesson, question or vocabulary entry.</div>' : '') +
-        '<div class="small muted" style="margin-bottom:6px">Model ' + esc(data.model) + ' · ' + esc(data.remainingToday) + ' requests left today</div>';
-      out.appendChild(pre);
-    })
-    .catch(function (error) {
-      busy(button, false);
-      // A timeout / dropped connection may still have reached the server: retry with the SAME
-      // requestId so the server returns the stored answer instead of calling the AI (and charging quota) again.
-      State.aiRetry = (error && (error.code === 'NETWORK_ERROR' || error.code === 'TIMEOUT')) ? { sig: aiSig, id: aiRid } : null;
-      out.innerHTML = '<div class="notice error">' + esc(error.message) + '</div>';
-    });
-};
 
 /* =========================================================================
  * TEACHER VIEWS
@@ -1714,7 +1648,6 @@ function viewLessonBuilder(lessonId) {
       '<button role="tab" aria-selected="false" data-act="lesson-tab" data-tab="details">Details</button>' +
       '<button role="tab" aria-selected="false" data-act="lesson-tab" data-tab="vocab">Vocabulary</button>' +
       '<button role="tab" aria-selected="false" data-act="lesson-tab" data-tab="classes">Classes</button>' +
-      '<button role="tab" aria-selected="false" data-act="lesson-tab" data-tab="ai">AI drafting</button>' +
       '</div><div id="lesson-tabpanel"></div>';
     setView(html);
     renderLessonTab('blocks');
@@ -1787,9 +1720,6 @@ function renderLessonTab(tab) {
             '<button class="btn" type="submit" style="margin-top:10px">Save class assignment</button></form>'
         : '<p class="small muted">You have no active classes yet.</p><a class="btn secondary" href="#/classes">Create a class</a>') +
       '</div>';
-  } else if (tab === 'ai') {
-    panel.innerHTML = aiPanel(['LESSON_DRAFT', 'VOCABULARY_DRAFT', 'ACTIVITY_IDEAS', 'QUESTION_DRAFT'],
-      'Example: a speaking lesson about handing over a shift in an automotive workshop, grade XI.');
   }
 }
 function renderBlocks() {
@@ -2768,11 +2698,7 @@ function viewQuestions() {
         '<div class="field"><label for="qf-status">Status</label><select id="qf-status" name="status">' +
           selectOptions([{ value: '', label: 'All' }, { value: 'DRAFT', label: 'Draft' }, { value: 'PUBLISHED', label: 'Published' }, { value: 'ARCHIVED', label: 'Archived' }], f.status || '') + '</select></div>' +
         '<button class="btn secondary" type="submit">Apply</button>' +
-      '</form>' + body +
-      '<div class="section"><h2>Drafting help</h2>' +
-        aiPanel(['QUESTION_DRAFT', 'ACTIVITY_IDEAS'].map(function (v) { return { value: v, label: titleCase(v) }; }),
-          'Example: four multiple-choice questions about telephone English for hotel front office, level easy.') +
-      '</div>'
+      '</form>' + body
     );
   }).catch(showError);
 }
@@ -3477,14 +3403,6 @@ function viewClassAnalytics(classId) {
  * STUDENT VIEWS
  * ========================================================================= */
 
-var STUDENT_AI_FEATURES = [
-  { value: 'GRAMMAR_EXPLAIN', label: 'Explain a grammar point' },
-  { value: 'VOCABULARY_EXPLAIN', label: 'Explain a word or phrase' },
-  { value: 'LEARNING_HINT', label: 'Give me a hint' },
-  { value: 'PRACTICE_HELP', label: 'Help me practise' },
-  { value: 'WRITING_FEEDBACK', label: 'Feedback on my writing' }
-];
-
 function viewStudentHome() {
   showLoading();
   api('my.dashboard', {}).then(function (data) {
@@ -3673,9 +3591,7 @@ function viewStudentLesson(lessonId) {
         ' <a class="btn quiet" href="#/lessons">Back to lessons</a>') +
       (l.summary ? '<p class="muted">' + esc(l.summary) + '</p>' : '') +
       '<div class="section">' + blockHtml + '</div>' +
-      '<div class="section"><h2>Vocabulary</h2>' + vocabHtml + '</div>' +
-      '<div class="section"><h2>Need help?</h2>' +
-        aiPanel(STUDENT_AI_FEATURES, 'Paste the sentence or word you want explained.') + '</div>'
+      '<div class="section"><h2>Vocabulary</h2>' + vocabHtml + '</div>'
     );
   }).catch(showError);
 }
@@ -3837,9 +3753,7 @@ function viewStudentAssignment(assignmentId) {
       (s ? '<p class="small muted">Last handed in ' + esc(fmtDate(s.submittedAt, true)) +
             (s.fileName ? ' · <a href="' + esc(s.fileUrl) + '" target="_blank" rel="noopener">' + esc(s.fileName) + '</a>' : '') + '</p>' : '') +
       '<div class="section"><h2>Your submission</h2>' + formHtml + '</div>' +
-      resultHtml +
-      '<div class="section"><h2>Need help?</h2>' +
-        aiPanel(STUDENT_AI_FEATURES, 'Paste your draft to get feedback before you hand it in.') + '</div>'
+      resultHtml
     );
   }).catch(showError);
 }
@@ -3898,7 +3812,6 @@ function viewPractice() {
     '<div class="tabs" role="tablist">' +
       '<button role="tab" data-act="practice-tab" data-tab="quizzes" aria-selected="' + (tab === 'quizzes') + '">Quizzes</button>' +
       '<button role="tab" data-act="practice-tab" data-tab="drill" aria-selected="' + (tab === 'drill') + '">Practice drill</button>' +
-      '<button role="tab" data-act="practice-tab" data-tab="help" aria-selected="' + (tab === 'help') + '">Ask for help</button>' +
     '</div><div id="practice-body"><div class="loading">Loading…</div></div>'
   );
   renderPracticeTab(tab);
@@ -3914,10 +3827,6 @@ Actions['practice-tab'] = function (btn) {
 function renderPracticeTab(tab) {
   var box = qs('#practice-body');
   if (!box) return;
-  if (tab === 'help') {
-    box.innerHTML = aiPanel(STUDENT_AI_FEATURES, 'Ask about a grammar point, a word, or paste a sentence you are unsure about.');
-    return;
-  }
   if (tab === 'drill') {
     box.innerHTML =
       '<form class="filterbar" data-act="practice-start">' +
