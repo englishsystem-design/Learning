@@ -398,8 +398,21 @@ td.rowacts{white-space:nowrap}
  * ========================================================================= */
 
 /* --- 1. CONFIGURATION ------------------------------------------------- */
-/* Paste your Apps Script Web App /exec URL here. This is the only value to edit. */
-var API_BASE_URL = 'https://script.google.com/macros/s/AKfycbztZU5sKT5TxfXZLL9KmjGnucOA8rQo7Sdvp13gc2h268MwkLfk6N6zrI86xPp9Cjc/exec';
+/* Opened through the Apps Script Web App itself (the normal setup): nothing to configure - the server
+   fills in its own /exec address below. Hosted somewhere else (for example GitHub Pages): put the
+   Web App /exec URL between the quotes of API_URL_OVERRIDE. */
+var API_URL_OVERRIDE = 'https://script.google.com/macros/s/AKfycbztZU5sKT5TxfXZLL9KmjGnucOA8rQo7Sdvp13gc2h268MwkLfk6N6zrI86xPp9Cjc/exec';
+var INJECTED_API_URL = '<?= apiUrl ?>';
+var API_BASE_URL = resolveApiUrl();
+
+function resolveApiUrl() {
+  var override = String(API_URL_OVERRIDE || '').trim();
+  if (/^https:\/\/script\.google(usercontent)?\.com\//.test(override)) return override;
+  var injected = String(INJECTED_API_URL || '').trim();
+  if (/^https:\/\/script\.google\.com\//.test(injected)) return injected;
+  return '';
+}
+function apiUrlMissing() { return !API_BASE_URL; }
 
 var APP = {
   timeoutMs: 45000,
@@ -632,8 +645,8 @@ var ERROR_TEXT = {
  * text/plain keeps the request CORS-simple, so no preflight is needed.
  */
 function api(action, params, requestId) {
-  if (!API_BASE_URL || API_BASE_URL.indexOf('PASTE_YOUR') === 0) {
-    return Promise.reject(new ApiError('NETWORK_ERROR', 'The API address has not been set in index.html.'));
+  if (apiUrlMissing()) {
+    return Promise.reject(new ApiError('NETWORK_ERROR', 'Alamat server belum diatur. Buka aplikasi melalui URL Web App, atau isi API_URL_OVERRIDE di index.html.'));
   }
   var controller = new AbortController();
   var timer = setTimeout(function () { controller.abort(); }, APP.timeoutMs);
@@ -656,7 +669,11 @@ function api(action, params, requestId) {
       return response.text().then(function (text) {
         var payload;
         try { payload = JSON.parse(text); }
-        catch (e) { throw new ApiError('INTERNAL_ERROR', 'The server returned an unreadable response.'); }
+        catch (e) {
+          throw new ApiError('INTERNAL_ERROR', looksLikeHtml(text)
+            ? 'Server mengirim halaman, bukan data. Pastikan Web App di-deploy dengan akses "Anyone" dan memakai versi terbaru.'
+            : (response.ok ? 'Respons server tidak dapat dibaca.' : 'Server tidak dapat diakses (kode ' + response.status + ').'));
+        }
         if (!payload || typeof payload !== 'object') {
           throw new ApiError('INTERNAL_ERROR', ERROR_TEXT.INTERNAL_ERROR);
         }
@@ -677,6 +694,8 @@ function api(action, params, requestId) {
     });
 }
 
+function looksLikeHtml(text) { return /^\s*<(!doctype|html|\?xml|head|body)/i.test(String(text || '')); }
+
 function endSession(message) {
   State.token = null;
   State.user = null;
@@ -690,8 +709,8 @@ function endSession(message) {
  * onProgress(percent 0-100) is called while the request body is being sent.
  */
 function apiUpload(action, params, requestId, onProgress) {
-  if (!API_BASE_URL || API_BASE_URL.indexOf('PASTE_YOUR') === 0) {
-    return Promise.reject(new ApiError('NETWORK_ERROR', 'The API address has not been set in index.html.'));
+  if (apiUrlMissing()) {
+    return Promise.reject(new ApiError('NETWORK_ERROR', 'Alamat server belum diatur. Buka aplikasi melalui URL Web App, atau isi API_URL_OVERRIDE di index.html.'));
   }
   return new Promise(function (resolve, reject) {
     var xhr = new XMLHttpRequest();
@@ -706,7 +725,12 @@ function apiUpload(action, params, requestId, onProgress) {
     xhr.onload = function () {
       var payload;
       try { payload = JSON.parse(xhr.responseText); }
-      catch (e) { reject(new ApiError('INTERNAL_ERROR', 'The server returned an unreadable response.')); return; }
+      catch (e) {
+        reject(new ApiError('INTERNAL_ERROR', looksLikeHtml(xhr.responseText)
+          ? 'Server mengirim halaman, bukan data. Pastikan Web App di-deploy dengan akses "Anyone" dan memakai versi terbaru.'
+          : 'Respons server tidak dapat dibaca.'));
+        return;
+      }
       if (payload && payload.success) { resolve(payload.data || {}); return; }
       var code = (payload && payload.error && payload.error.code) || 'INTERNAL_ERROR';
       var message = (payload && payload.error && payload.error.message) || ERROR_TEXT[code] || ERROR_TEXT.INTERNAL_ERROR;
@@ -1025,13 +1049,24 @@ function boot() {
     });
 }
 
+window.addEventListener('unhandledrejection', function (event) {
+  if (event && event.preventDefault) event.preventDefault();
+  var reason = event && event.reason;
+  if (!(reason instanceof ApiError)) toast('Terjadi kesalahan. Muat ulang halaman jika masalah berlanjut.', 'error');
+});
+window.addEventListener('error', function () { toast('Terjadi kesalahan pada halaman ini.', 'error'); });
+
 function startApp() {
   renderShell();
   var home = State.user.role === 'TEACHER' ? '#/dashboard' : '#/home';
-  if (!location.hash || location.hash === '#' || location.hash === '#/') {
-    location.hash = home;          // triggers the router through hashchange
-  } else {
-    route();
+  try {
+    if (!location.hash || location.hash === '#' || location.hash === '#/') {
+      location.hash = home;          // triggers the router through hashchange
+    } else {
+      route();
+    }
+  } catch (e) {
+    showError(new ApiError('INTERNAL_ERROR', 'Halaman tidak dapat dibuka. Coba menu lain atau muat ulang.'));
   }
   State.booted = true;
 }
@@ -1210,7 +1245,13 @@ Actions['change-password'] = function (form) {
   var button = qs('button[type=submit]', form);
   busy(button, true, 'Saving…');
   api('auth.changePassword', { currentPassword: values.currentPassword, newPassword: values.newPassword })
-    .then(function () { closeModal(); toast('Password changed.', 'success'); })
+    .then(function (data) {
+      if (data.token) {
+        State.token = data.token;
+        try { localStorage.setItem(APP.storageKey, data.token); } catch (e) {}
+      }
+      closeModal(); toast('Password changed. Other devices have been signed out.', 'success');
+    })
     .catch(function (error) {
       busy(button, false);
       qs('#pw-msg').innerHTML = '<div class="notice error">' + esc(error.message) + '</div>';
@@ -2068,6 +2109,7 @@ function viewClassDetail(classId) {
               '<td data-label="Actions">' +
                 '<button class="btn secondary small" data-act="student-transfer" data-id="' + esc(s.id) + '">Transfer</button>' +
                 '<button class="btn secondary small" data-act="student-reset" data-id="' + esc(s.id) + '">Reset password</button>' +
+                '<button class="btn secondary small" data-act="student-status" data-id="' + esc(s.id) + '" data-status="' + (s.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE') + '">' + (s.status === 'ACTIVE' ? 'Deactivate' : 'Activate') + '</button>' +
                 '<button class="btn danger small" data-act="student-remove" data-id="' + esc(s.id) + '">Remove</button>' +
               '</td></tr>';
           }).join('') + '</tbody></table></div>';
@@ -2100,6 +2142,17 @@ Actions['student-remove'] = function (btn) {
   busy(btn, true, '…');
   api('class.removeStudent', { classId: State.view.classId, studentId: btn.getAttribute('data-id') })
     .then(function () { toast('Student removed from the class.', 'success'); viewClassDetail(State.view.classId); })
+    .catch(function (error) { busy(btn, false); toast(error.message, 'error'); });
+};
+Actions['student-status'] = function (btn) {
+  var status = btn.getAttribute('data-status');
+  var question = status === 'INACTIVE'
+    ? 'Nonaktifkan akun siswa ini? Siswa tidak dapat masuk sampai diaktifkan kembali. Data tetap tersimpan.'
+    : 'Aktifkan kembali akun siswa ini?';
+  if (!confirm(question)) return;
+  busy(btn, true, '…');
+  api('student.setStatus', { studentId: btn.getAttribute('data-id'), status: status })
+    .then(function () { toast(status === 'INACTIVE' ? 'Akun dinonaktifkan.' : 'Akun diaktifkan.', 'success'); viewClassDetail(State.view.classId); })
     .catch(function (error) { busy(btn, false); toast(error.message, 'error'); });
 };
 Actions['student-transfer'] = function (btn) {
@@ -2265,18 +2318,22 @@ function importResultsHtml() {
   var results = ImportState.results;
   var created = ImportState.created || 0;
   var failed = ImportState.failed || 0;
+  var skipped = ImportState.skipped || 0;
   var rows = results.map(function (r) {
     return '<tr>' +
       '<td class="rownum">' + r.row + '</td>' +
       '<td>' + esc(r.name) + '</td>' +
       '<td>' + esc(r.email) + '</td>' +
-      '<td>' + (r.status === 'CREATED' ? '<span class="badge active">Created</span>' : '<span class="badge inactive" style="color:var(--rose);background:var(--rose-soft);border-color:#EFD2D6">Failed</span>') + '</td>' +
+      '<td>' + (r.status === 'CREATED' ? '<span class="badge active">Created</span>'
+        : (r.status === 'SKIPPED' ? '<span class="badge draft">Skipped</span>'
+          : '<span class="badge inactive" style="color:var(--rose);background:var(--rose-soft);border-color:#EFD2D6">Failed</span>')) + '</td>' +
       '<td class="small muted">' + esc(r.message || '—') + '</td>' +
     '</tr>';
   }).join('');
   return (
     '<div class="impsummary">' +
       '<div><div class="n2">' + created + '</div><div class="small muted">Created</div></div>' +
+      '<div><div class="n2">' + skipped + '</div><div class="small muted">Skipped</div></div>' +
       '<div><div class="n2">' + failed + '</div><div class="small muted">Failed</div></div>' +
     '</div>' +
     '<div class="tablewrap"><table class="imptable responsive"><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Result</th><th>Details</th></tr></thead><tbody>' +
@@ -2314,6 +2371,7 @@ Actions['import-submit'] = function () {
     .then(function (data) {
       ImportState.results = data.results;
       ImportState.created = data.created;
+      ImportState.skipped = data.skipped || 0;
       ImportState.failed = data.failed;
       qs('.modal header h2').textContent = 'Import results';
       refreshImportBody();
@@ -3836,6 +3894,7 @@ function renderPracticeTab(tab) {
           selectOptions([{ value: '5', label: '5' }, { value: '8', label: '8' }, { value: '12', label: '12' }], '8') + '</select></div>' +
         '<button class="btn" type="submit">Start practice</button>' +
       '</form><div id="drill-body"></div>';
+    resumeDrillIfAny();
     return;
   }
   box.innerHTML = '<div class="loading">Loading…</div>';
@@ -3868,18 +3927,35 @@ Actions['practice-start'] = function (form) {
   busy(button, true, 'Loading…');
   api('my.practiceSet', { skill: values.skill, size: num(values.size, 8) }).then(function (data) {
     busy(button, false);
-    if (!data.questions.length) {
-      body.innerHTML = '<div class="notice">' + esc(data.message || 'No practice questions are available yet.') + '</div>';
-      return;
-    }
-    State.view.drill = data.questions;
-    State.view.drillSession = data.sessionId || '';
-    body.innerHTML = '<form data-act="practice-check">' +
-      data.questions.map(function (q, i) { return practiceQuestionHtml(q, i); }).join('') +
-      '<button class="btn" type="submit">Check my answers</button></form>' +
-      '<div id="drill-result"></div>';
+    showDrill(body, data);
   }).catch(function (error) { busy(button, false); toast(error.message, 'error'); });
 };
+
+var DRILL_FLAG = 'smk_practice_open';
+function showDrill(body, data) {
+  if (!data.questions || !data.questions.length) {
+    try { sessionStorage.removeItem(DRILL_FLAG); } catch (e) {}
+    body.innerHTML = '<div class="notice">' + esc(data.message || 'No practice questions are available yet.') + '</div>';
+    return;
+  }
+  State.view.drill = data.questions;
+  State.view.drillSession = data.sessionId || '';
+  try { sessionStorage.setItem(DRILL_FLAG, '1'); } catch (e) {}
+  body.innerHTML = (data.resumed ? '<div class="notice">Melanjutkan latihan terakhir Anda yang belum diperiksa.</div>' : '') +
+    '<form data-act="practice-check">' +
+    data.questions.map(function (q, i) { return practiceQuestionHtml(q, i); }).join('') +
+    '<button class="btn" type="submit">Check my answers</button></form>' +
+    '<div id="drill-result"></div>';
+}
+/** After a refresh, offer the student's unfinished practice session again (questions only; answers are not kept). */
+function resumeDrillIfAny() {
+  var flag = null;
+  try { flag = sessionStorage.getItem(DRILL_FLAG); } catch (e) {}
+  var body = qs('#drill-body');
+  if (!flag || !body || State.view.drill) return;
+  api('my.practiceSet', { resume: true }).then(function (data) { if (qs('#drill-body') === body) showDrill(body, data); })
+    .catch(function () { try { sessionStorage.removeItem(DRILL_FLAG); } catch (e) {} });
+}
 
 function practiceQuestionHtml(q, index) {
   var input;
@@ -3924,7 +4000,24 @@ Actions['practice-check'] = function (form) {
           (r.explanation ? '<p class="small muted">' + esc(r.explanation) + '</p>' : '') + '</div>';
       }).join('') + '</div>';
     out.scrollIntoView({ block: 'start' });
-  }).catch(function (error) { busy(button, false); toast(error.message, 'error'); });
+    try { sessionStorage.removeItem(DRILL_FLAG); } catch (e) {}
+  }).catch(function (error) {
+    busy(button, false);
+    if (error.code === 'NOT_FOUND') {
+      // The session is gone or has expired: say so and offer a clean restart instead of a dead form.
+      try { sessionStorage.removeItem(DRILL_FLAG); } catch (e) {}
+      State.view.drill = null; State.view.drillSession = '';
+      var body = qs('#drill-body');
+      if (body) body.innerHTML = '<div class="notice error">' + esc(error.message) + '</div>' +
+        '<p><button type="button" class="btn" data-act="practice-restart">Mulai latihan baru</button></p>';
+      return;
+    }
+    toast(error.message, 'error');
+  });
+};
+Actions['practice-restart'] = function () {
+  var form = qs('form[data-act="practice-start"]');
+  if (form) { var body = qs('#drill-body'); if (body) body.innerHTML = ''; if (form.requestSubmit) form.requestSubmit(); }
 };
 
 /* --- Quiz runner -------------------------------------------------------- */
@@ -3969,9 +4062,13 @@ function viewQuizRunner(r) {
       // loaded" - resuming an attempt that has been open a while must show the time actually
       // left, not reset the clock. The backend enforces the real deadline regardless; this only
       // keeps the on-screen countdown honest.
-      var totalSeconds = num(quiz.timeLimitMinutes, 0) * 60;
-      var elapsedSeconds = data.startedAt ? Math.max(0, Math.floor((Date.now() - new Date(data.startedAt).getTime()) / 1000)) : 0;
-      startQuizCountdown(Math.max(0, totalSeconds - elapsedSeconds));
+      if (data.remainingSeconds !== null && data.remainingSeconds !== undefined) {
+        startQuizCountdown(Math.max(0, num(data.remainingSeconds, 0)));      // server clock: not affected by this device's clock
+      } else {
+        var totalSeconds = num(quiz.timeLimitMinutes, 0) * 60;
+        var elapsedSeconds = data.startedAt ? Math.max(0, Math.floor((Date.now() - new Date(data.startedAt).getTime()) / 1000)) : 0;
+        startQuizCountdown(Math.max(0, totalSeconds - elapsedSeconds));
+      }
     }
   }).catch(showError);
 }
@@ -4056,6 +4153,12 @@ function submitQuiz(form, button) {
 }
 
 function renderQuizResult(data) {
+  if (data.timedOut) {
+    setView(pageHead('Waktu habis', 'Attempt ' + num(data.attemptNumber, 1) + ' recorded.',
+      '<a class="btn secondary" href="#/practice">Back to practice</a>') +
+      '<div class="notice error">' + esc(data.message || 'Waktu pengerjaan telah habis.') + '</div>');
+    return;
+  }
   var head = data.resultVisible
     ? pageHead('Quiz result', 'Score ' + num(data.score, 0) + ' of ' + num(data.maxScore, 0) + ' (' + num(data.percentage, 0) + '%)',
         '<a class="btn secondary" href="#/practice">Back to practice</a>')
@@ -4074,6 +4177,9 @@ function renderQuizResult(data) {
           (r.explanation ? '<p class="small">' + esc(r.explanation) + '</p>' : '') + '</div>';
       }).join('') + '</div>'
     : '<div class="notice">' + esc(data.message || 'Your work has been recorded.') + '</div>';
+  if (num(data.pendingReview, 0) > 0) {
+    body += '<div class="notice">' + num(data.pendingReview, 0) + ' pertanyaan menunggu penilaian guru dan belum termasuk dalam nilai ini.</div>';
+  }
 
   setView(head + body);
 }
